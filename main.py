@@ -562,8 +562,30 @@ def get_item_divs(html: str, item_category: str) -> list:
     ]
 
 
+def get_available_categories(html: str) -> list[str]:
+    """
+    Extract the distinct category keys present in a droplist page.
+    """
+    soup: BeautifulSoup = BeautifulSoup(html, "html.parser")
+    return sorted(
+        {
+            item["data-category"].strip()
+            for item in soup.select("[data-category]")
+            if item.get("data-category")
+        }
+    )
+
+
+def append_debug_message(debug_info: dict, message: str) -> None:
+    """
+    Append a concise debug message while keeping the panel readable.
+    """
+    debug_info.setdefault("messages", []).append(message)
+    debug_info["messages"] = debug_info["messages"][-8:]
+
+
 # Util function to fetch all information based on drop date and item category
-def fetch_items(drop_date: str, item_category: str) -> dict:
+def fetch_items(drop_date: str, item_category: str) -> tuple[dict, dict]:
     """
     Fetch all item information for a specific drop date and category from SupremeCommunity.
 
@@ -581,15 +603,8 @@ def fetch_items(drop_date: str, item_category: str) -> dict:
 
     Returns
     -------
-    dict
-        A dictionary where each key is an item name and each value is a dictionary
-        containing the following information:
-        - "category": Item category.
-        - "price": Item price as a string (or "None" if unavailable).
-        - "image": URL of the item's image.
-        - "colors": List of available color options.
-        - "link": Direct link to the item page.
-        - "votes": Tuple of (likes, dislikes) as strings.
+    tuple[dict, dict]
+        The fetched items and a debug payload describing how the scrape behaved.
     """
 
     # Converting the tops-sweater option
@@ -603,61 +618,135 @@ def fetch_items(drop_date: str, item_category: str) -> dict:
 
     # Creating an Object to store the fetched items
     items_dict: dict = dict()
+    debug_info: dict = {
+        "selected_date": drop_date,
+        "selected_category": item_category,
+        "url": url,
+        "http_status": "not-requested",
+        "http_matches": 0,
+        "rendered_matches": 0,
+        "source": "none",
+        "items_built": 0,
+        "detail_pages_ok": 0,
+        "detail_pages_failed": 0,
+        "available_categories": [],
+        "messages": [],
+    }
 
     # Initializing item_divs to an empty list
     item_divs: list = list()
 
     # Fetching all items of a certain type
-    response: requests.models.Response = get(url)
-    if response.status_code == 200:
-        item_divs = get_item_divs(response.text, item_category)
+    try:
+        response: requests.models.Response = get(url)
+        debug_info["http_status"] = response.status_code
+        if response.status_code == 200:
+            item_divs = get_item_divs(response.text, item_category)
+            debug_info["http_matches"] = len(item_divs)
+            debug_info["available_categories"] = get_available_categories(response.text)
+            if item_divs:
+                debug_info["source"] = "http"
+    except Exception as e:
+        append_debug_message(debug_info, f"http fetch failed: {type(e).__name__}: {e}")
 
     # Fallback to a rendered browser page for unreleased drops that are injected with JS
     if not item_divs:
         try:
             rendered_html: str = get_rendered_html(url)
             item_divs = get_item_divs(rendered_html, item_category)
+            debug_info["rendered_matches"] = len(item_divs)
+            if not debug_info["available_categories"]:
+                debug_info["available_categories"] = get_available_categories(
+                    rendered_html
+                )
+            if item_divs:
+                debug_info["source"] = "rendered"
+            else:
+                append_debug_message(
+                    debug_info, "rendered fallback found 0 matching category nodes"
+                )
         except Exception:
-            pass
+            append_debug_message(debug_info, "rendered fallback failed")
 
     # Storing Items' Infos
     for item in item_divs:
-        item_name: str = item.find("h3", {"class": "item-name"}).text.replace("\n", "")
-        item_price: str = (
-            item.find("span", {"class": "item-price"})
-            .text.replace("\n", "")
-            .split("/")[0]
-            if item.find("span", {"class": "item-price"})
-            else "None"
-        )
-        item_image: str = item.find("img")["src"]
-        item_colors: list = list()
-        item_full_link: str = (
-            f'https://www.supremecommunity.com{item.find("a")["href"]}'
-        )
-        response: requests.models.Response = get(item_full_link)
-        if item_price != "None" and response.status_code == 200:
-            soup: BeautifulSoup = BeautifulSoup(response.text, "html.parser")
-            color_div = soup.find("div", {"class": "colorway-list"})
-            item_colors: list = [
-                color.text.replace("\n", "")
-                for color in color_div.find_all("span", {"class": "colorway-tag"})
-            ]
-        item_votes: tuple[str, str] = (
-            soup.find("span", {"id": "upvote-count"}).text,
-            soup.find("span", {"id": "downvote-count"}).text,
-        )
-        item_type: str = item["data-category"]
-        items_dict[item_name.strip()] = {
-            "category": item_type.strip(),
-            "price": item_price.strip(),
-            "image": item_image,
-            "colors": [color.strip() for color in item_colors if type(color) == str],
-            "link": item_full_link,
-            "votes": item_votes,
-        }
+        try:
+            name_tag = item.find("h3", {"class": "item-name"})
+            link_tag = item.find("a", href=True)
+            image_tag = item.find("img")
+            item_name: str = (
+                name_tag.text.replace("\n", "").strip() if name_tag else "Unknown Item"
+            )
+            item_price_tag = item.find("span", {"class": "item-price"})
+            item_price: str = (
+                item_price_tag.text.replace("\n", "").split("/")[0].strip()
+                if item_price_tag
+                else "None"
+            )
+            item_image: str = image_tag["src"] if image_tag and image_tag.get("src") else ""
+            item_full_link: str = (
+                f'https://www.supremecommunity.com{link_tag["href"]}'
+                if link_tag
+                else url
+            )
+            item_type: str = item.get("data-category", item_category).strip()
 
-    return items_dict
+            item_colors: list[str] = []
+            item_votes: tuple[str, str] = ("0", "0")
+
+            try:
+                detail_response: requests.models.Response = get(item_full_link)
+                if detail_response.status_code == 200:
+                    debug_info["detail_pages_ok"] += 1
+                    detail_soup: BeautifulSoup = BeautifulSoup(
+                        detail_response.text, "html.parser"
+                    )
+                    color_div = detail_soup.find("div", {"class": "colorway-list"})
+                    if color_div:
+                        item_colors = [
+                            color.text.replace("\n", "").strip()
+                            for color in color_div.find_all(
+                                "span", {"class": "colorway-tag"}
+                            )
+                            if color.text
+                        ]
+                    upvote = detail_soup.find("span", {"id": "upvote-count"})
+                    downvote = detail_soup.find("span", {"id": "downvote-count"})
+                    item_votes = (
+                        upvote.text.strip() if upvote else "0",
+                        downvote.text.strip() if downvote else "0",
+                    )
+                else:
+                    debug_info["detail_pages_failed"] += 1
+                    append_debug_message(
+                        debug_info,
+                        f"detail page {detail_response.status_code} for {item_name[:40]}",
+                    )
+            except Exception as e:
+                debug_info["detail_pages_failed"] += 1
+                append_debug_message(
+                    debug_info,
+                    f"detail parse failed for {item_name[:40]}: {type(e).__name__}",
+                )
+
+            items_dict[item_name] = {
+                "category": item_type,
+                "price": item_price,
+                "image": item_image,
+                "colors": [color for color in item_colors if isinstance(color, str)],
+                "link": item_full_link,
+                "votes": item_votes,
+            }
+            debug_info["items_built"] += 1
+        except Exception as e:
+            append_debug_message(
+                debug_info, f"item build failed: {type(e).__name__}: {e}"
+            )
+
+    if not items_dict:
+        append_debug_message(debug_info, "no items built for current filter")
+
+    return items_dict, debug_info
 
 
 # Function to get the number of items in the basket
@@ -875,6 +964,10 @@ class BasketCheckout:
                         ui.label(item["name"]).classes("font-mono font-bold text-base")
                         if item["color"] != "None":
                             ui.label(item["color"]).classes("font-mono")
+                        elif item.get("color_keywords"):
+                            ui.label(
+                                "Keywords: " + ", ".join(item["color_keywords"])
+                            ).classes("font-mono")
                         if item["size"] != "None":
                             ui.label(item["size"]).classes("font-mono")
                     ui.space()
@@ -954,7 +1047,7 @@ class BasketCheckout:
                 details_exp_grid: ui.grid = ui.grid(columns="1fr 1fr 1fr 1fr")
                 address_cvv_grid: ui.grid = ui.grid(columns="1fr 1fr")
                 zones_grid: ui.grid = ui.grid(columns="1fr 1fr")
-                phone_checkout_grid: ui.grid = ui.grid(columns="1fr 1fr")
+                phone_checkout_grid: ui.grid = ui.grid(columns="2fr 1fr 1fr")
                 with nations_card_grid:
                     custom_select(
                         [nation for nation in NATIONS.keys()],
@@ -974,6 +1067,9 @@ class BasketCheckout:
                     self.render_zone()
                 with phone_checkout_grid:
                     custom_input("Phone").bind_value_to(self.bot, "PHONE")
+                    ui.button(
+                        "Dry Run", on_click=lambda _: self.bot.dry_run()
+                    ).props("square outline color=black").classes("font-mono")
                     ui.button(
                         "Start Supremebot", on_click=lambda _: self.bot.start()
                     ).props(f"square fill color=red-600").classes("font-mono")
@@ -1026,6 +1122,7 @@ class Item(ui.grid):
         self.name: str = name
         self.info: str = info
         self.selected_color = "None"
+        self.selected_color_keywords = ""
         self.selected_size = "None"
         self.basket: BasketCheckout = basket
 
@@ -1101,7 +1198,7 @@ class Item(ui.grid):
             if not self.basket.item_in(self.name):
 
                 # Creating the title (if the customize options are availbale)
-                if self.info["colors"] or size_options != "None":
+                if self.info["colors"] or size_options != "None" or not self.info["colors"]:
                     ui.label("Customize").classes("text-lg text-bold font-mono pt-2")
 
                 if self.info["colors"]:
@@ -1114,6 +1211,16 @@ class Item(ui.grid):
                     ).bind_value_to(
                         self, "selected_color"
                     )
+                else:
+                    ui.label("Preferred color keywords").classes(
+                        "font-mono pt-2 text-sm"
+                    )
+                    custom_input("navy, blue").classes("pt-2").bind_value_to(
+                        self, "selected_color_keywords"
+                    )
+                    ui.label(
+                        "Used only when SupremeCommunity does not list exact colorways."
+                    ).classes("font-mono text-xs text-grey-7 pt-1")
 
                 if size_options != "None":
                     ui.select(
@@ -1139,9 +1246,15 @@ class Item(ui.grid):
         """
 
         # Creating the item dict to convert in json format
+        color_keywords: list[str] = [
+            keyword.strip()
+            for keyword in self.selected_color_keywords.split(",")
+            if keyword.strip()
+        ]
         item_object: dict = {
             "name": self.name,
             "color": self.selected_color,
+            "color_keywords": color_keywords,
             "size": self.selected_size,
             "price": self.info["price"],
             "category": self.info["category"],
@@ -1255,7 +1368,9 @@ class Item(ui.grid):
 
 # Creating the Items List UI and logic blueprint
 class ItemsList:
-    def __init__(self, basket: BasketCheckout, container: ui.column) -> None:
+    def __init__(
+        self, basket: BasketCheckout, container: ui.column, debug_container: ui.column
+    ) -> None:
         """
         Controller class responsible for rendering a list of product items.
 
@@ -1281,6 +1396,21 @@ class ItemsList:
         self.category: str = "T-Shirts"
         self.basket: BasketCheckout = basket
         self.container: ui.column = container
+        self.debug_container: ui.column = debug_container
+        self.debug_info: dict = {
+            "last_event": "initial load",
+            "selected_date": self.date,
+            "selected_category": self.category,
+            "url": "",
+            "http_status": "",
+            "http_matches": 0,
+            "rendered_matches": 0,
+            "source": "none",
+            "items_built": 0,
+            "detail_pages_ok": 0,
+            "detail_pages_failed": 0,
+            "messages": [],
+        }
 
     def refresh_drop_dates(self) -> list[str]:
         """
@@ -1302,6 +1432,7 @@ class ItemsList:
         Update the selected drop date and rerender the list.
         """
         self.date = drop_date
+        self.debug_info["last_event"] = f"date changed -> {drop_date}"
         self.render()
 
     def set_category(self, category: str) -> None:
@@ -1309,7 +1440,52 @@ class ItemsList:
         Update the selected category and rerender the list.
         """
         self.category = category
+        self.debug_info["last_event"] = f"category changed -> {category}"
         self.render()
+
+    def render_debug(self) -> None:
+        """
+        Render a temporary on-screen debug panel for scraper state.
+        """
+        self.debug_container.clear()
+        with self.debug_container:
+            with ui.card().classes("w-full mt-4 bg-grey-1"):
+                ui.label("Debug").classes("font-mono font-bold text-base")
+                ui.label(
+                    f"event: {self.debug_info.get('last_event', 'n/a')}"
+                ).classes("font-mono text-sm")
+                ui.label(
+                    f"date: {self.debug_info.get('selected_date', 'n/a')}"
+                ).classes("font-mono text-sm")
+                ui.label(
+                    f"category: {self.debug_info.get('selected_category', 'n/a')}"
+                ).classes("font-mono text-sm")
+                ui.label(
+                    f"url: {self.debug_info.get('url', 'n/a')}"
+                ).classes("font-mono text-xs break-all")
+                ui.label(
+                    "http status: "
+                    f"{self.debug_info.get('http_status', 'n/a')} | "
+                    f"http matches: {self.debug_info.get('http_matches', 0)} | "
+                    f"rendered matches: {self.debug_info.get('rendered_matches', 0)}"
+                ).classes("font-mono text-sm")
+                ui.label(
+                    "source: "
+                    f"{self.debug_info.get('source', 'n/a')} | "
+                    f"items built: {self.debug_info.get('items_built', 0)} | "
+                    f"detail ok: {self.debug_info.get('detail_pages_ok', 0)} | "
+                    f"detail failed: {self.debug_info.get('detail_pages_failed', 0)}"
+                ).classes("font-mono text-sm")
+                ui.label(
+                    "page categories: "
+                    + ", ".join(self.debug_info.get("available_categories", []))
+                ).classes("font-mono text-xs break-all")
+                messages = self.debug_info.get("messages", [])
+                if messages:
+                    for message in messages:
+                        ui.label(f"- {message}").classes(
+                            "font-mono text-xs text-red-700 break-all"
+                        )
 
     # Render all the Items object inside the column, with the specified date and category
     def render(self) -> None:
@@ -1322,11 +1498,27 @@ class ItemsList:
         - Instantiates an `Item` UI component for each product
         """
 
-        # Fetching the items
-        items: dict = fetch_items(self.date, self.category)
-
-        # For each item in the fetched list, render its corresponding component
         self.container.clear()
+        try:
+            items, debug_info = fetch_items(self.date, self.category)
+            debug_info["last_event"] = self.debug_info.get("last_event", "render")
+            self.debug_info = debug_info
+        except Exception as e:
+            self.debug_info = {
+                **self.debug_info,
+                "selected_date": self.date,
+                "selected_category": self.category,
+                "items_built": 0,
+                "messages": [f"render crashed: {type(e).__name__}: {e}"],
+            }
+            self.render_debug()
+            with self.container:
+                ui.label(
+                    f"Error loading items for {self.category} on {self.date}."
+                ).classes("font-mono text-base text-red-700 pt-4")
+            return
+
+        self.render_debug()
         if not items:
             with self.container:
                 ui.label(f"No items found for {self.category} on {self.date}.").classes(
@@ -1354,6 +1546,7 @@ with ui.element("div").classes("w-full p-8"):
     selectors_container: ui.grid = ui.grid(columns="1fr 5fr").classes("py-8")
 
     # The container for the items list
+    debug_container: ui.column = ui.column(align_items="stretch")
     list_container: ui.column = ui.column(align_items="stretch")
 
     # The container for the basket recap UI
@@ -1384,7 +1577,7 @@ with ui.element("div").classes("w-full p-8"):
     basket: BasketCheckout = BasketCheckout(basket_notifier, footer_container)
 
     # Creating the items list section
-    items_list: ItemsList = ItemsList(basket, list_container)
+    items_list: ItemsList = ItemsList(basket, list_container, debug_container)
 
     def refresh_drop_dates(_: Any = None) -> None:
         """
@@ -1428,8 +1621,12 @@ with ui.element("div").classes("w-full p-8"):
             ui.tab("Bags")
             ui.tab("Shirts")
 
-    # Rendering the list
-    items_list.render()
+    # Rendering the list (after NiceGUI event loop starts)
+    ui.timer(
+        0.0,
+        lambda: (items_list.render_debug(), items_list.render()),
+        once=True,
+    )
 
 # Running the app
 ui.run(title="Supremebot", favicon="img/icon.png")
