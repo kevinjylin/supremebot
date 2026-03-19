@@ -3,6 +3,7 @@ from nicegui import ui
 import requests
 import cloudscraper
 from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 import platform
 from functools import cache
 import re
@@ -368,14 +369,10 @@ headers: dict[str, str] = {
 }
 
 
-# Function to separate the fetching between Windows and other OSs (simplyfied code structure)
+# Function to fetch Supreme Community pages with a browser-like client
 def get(url: str) -> requests.models.Response:
     """
-    Fetch a web page using the appropriate method depending on the operating system.
-
-    On Windows, uses `cloudscraper` to bypass anti-bot protections.
-    On other operating systems, uses a standard `requests.get` call with
-    predefined headers.
+    Fetch a web page using a browser-like client with a requests fallback.
 
     Parameters
     ----------
@@ -387,16 +384,57 @@ def get(url: str) -> requests.models.Response:
     requests.models.Response
         The HTTP response object resulting from the GET request.
     """
-    if platform.system() == "Windows":
+    try:
         scraper: cloudscraper.CloudScraper = cloudscraper.create_scraper(
             browser={
                 "browser": "chrome",
-                "platform": "windows",
+                "platform": platform.system().lower(),
             },
         )
-        return scraper.get(url)
-    else:
-        return requests.get(url, headers=headers)
+        return scraper.get(
+            url,
+            headers={
+                **headers,
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+            },
+            timeout=15,
+        )
+    except Exception:
+        return requests.get(
+            url,
+            headers={
+                **headers,
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+            },
+            timeout=15,
+        )
+
+
+def get_rendered_html(url: str) -> str:
+    """
+    Render a page in headless Chromium and return the resulting HTML.
+
+    This is used as a fallback when Supreme Community serves content
+    client-side and the plain HTTP response does not include item data.
+    """
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        try:
+            page = browser.new_page()
+            try:
+                page.goto(url, wait_until="networkidle", timeout=45000)
+            except Exception:
+                page.goto(url, wait_until="domcontentloaded", timeout=45000)
+
+            # Give client-side filters and item grids time to hydrate.
+            page.wait_for_timeout(4000)
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            page.wait_for_timeout(1000)
+            return page.content()
+        finally:
+            browser.close()
 
 
 # Util function to convert a date to a certain format
@@ -445,15 +483,46 @@ def convert_date(date_str: str) -> str:
         return date.strftime("%Y-%m-%d")
 
 
+def parse_human_date(date_str: str) -> datetime.datetime:
+    """
+    Parse a human-readable date with an ordinal suffix into a datetime object.
+
+    Parameters
+    ----------
+    date_str : str
+        Date string such as `19th March 2026`.
+
+    Returns
+    -------
+    datetime.datetime
+        Parsed datetime for sorting and comparisons.
+    """
+    cleaned = re.sub(r"(\d+)(st|nd|rd|th)", r"\1", date_str)
+    return datetime.datetime.strptime(cleaned, "%d %B %Y")
+
+
+def extract_drop_dates_from_html(html: str) -> list[str]:
+    """
+    Extract available droplist dates from a Supreme Community season page.
+    """
+    soup: BeautifulSoup = BeautifulSoup(html, "html.parser")
+    dates_href: list = soup.find_all("a", {"class": "droplist-row"})
+    dates: list[str] = [a["href"].split("/")[-2] for a in dates_href]
+    return sorted(
+        {convert_date(date) for date in dates},
+        key=parse_human_date,
+        reverse=True,
+    )
+
+
 # Util function to get all the drop dates for the current release
-@cache
 def get_drop_dates() -> list:
     """
     Retrieve all drop dates for the current Supreme release season.
 
     This function fetches the HTML content from the SupremeCommunity droplists
-    page for the Fall/Winter 2025 season and parses it to extract all release
-    dates. The results are cached to avoid repeated network requests.
+    page for the Spring/Summer 2026 season and parses it to extract all release
+    dates.
 
     Returns
     -------
@@ -468,24 +537,32 @@ def get_drop_dates() -> list:
     # Fetching the source code
     response: requests.models.Response = get(url)
     if response.status_code == 200:
-        soup: BeautifulSoup = BeautifulSoup(response.text, "html.parser")
+        formatted_dates: list[str] = extract_drop_dates_from_html(response.text)
+        if formatted_dates:
+            return formatted_dates
 
-        # Find all dates
-        dates_href: list = soup.find_all("a", {"class": "droplist-row"})
-        dates: list[str] = [a["href"].split("/")[-2] for a in dates_href]
+    try:
+        rendered_html: str = get_rendered_html(url)
+        return extract_drop_dates_from_html(rendered_html)
+    except Exception:
+        pass
 
-        # Convert dates
-        formatted_dates: list[str] = list(map(convert_date, dates))
+    return list()
 
-        return formatted_dates
 
-    else:
-        # Return an empty list or handle the error as needed
-        return list()
+def get_item_divs(html: str, item_category: str) -> list:
+    """
+    Extract droplist item containers for the selected category.
+    """
+    soup: BeautifulSoup = BeautifulSoup(html, "html.parser")
+    return [
+        item
+        for item in soup.select(f'[data-category="{item_category.lower()}"]')
+        if item.find("h3", {"class": "item-name"})
+    ]
 
 
 # Util function to fetch all information based on drop date and item category
-@cache
 def fetch_items(drop_date: str, item_category: str) -> dict:
     """
     Fetch all item information for a specific drop date and category from SupremeCommunity.
@@ -533,10 +610,15 @@ def fetch_items(drop_date: str, item_category: str) -> dict:
     # Fetching all items of a certain type
     response: requests.models.Response = get(url)
     if response.status_code == 200:
-        soup: BeautifulSoup = BeautifulSoup(response.text, "html.parser")
-        item_divs: list = soup.find_all(
-            "div", {"data-category": f"{item_category.lower()}"}
-        )
+        item_divs = get_item_divs(response.text, item_category)
+
+    # Fallback to a rendered browser page for unreleased drops that are injected with JS
+    if not item_divs:
+        try:
+            rendered_html: str = get_rendered_html(url)
+            item_divs = get_item_divs(rendered_html, item_category)
+        except Exception:
+            pass
 
     # Storing Items' Infos
     for item in item_divs:
@@ -1190,11 +1272,44 @@ class ItemsList:
         """
 
         # Creating a date and category parameter to use to show items
-        drop_dates: list[str] = get_drop_dates()
-        self.date: str = drop_dates[0] if drop_dates else "2025-10-16"
+        self.drop_dates: list[str] = get_drop_dates()
+        self.date: str = (
+            self.drop_dates[0]
+            if self.drop_dates
+            else convert_date(datetime.date.today().isoformat())
+        )
         self.category: str = "T-Shirts"
         self.basket: BasketCheckout = basket
         self.container: ui.column = container
+
+    def refresh_drop_dates(self) -> list[str]:
+        """
+        Refresh available drop dates from Supreme Community.
+
+        Returns
+        -------
+        list[str]
+            Refreshed list of drop dates, newest first.
+        """
+        previous_date: str = self.date
+        self.drop_dates = get_drop_dates()
+        if self.drop_dates and previous_date not in self.drop_dates:
+            self.date = self.drop_dates[0]
+        return self.drop_dates
+
+    def set_date(self, drop_date: str) -> None:
+        """
+        Update the selected drop date and rerender the list.
+        """
+        self.date = drop_date
+        self.render()
+
+    def set_category(self, category: str) -> None:
+        """
+        Update the selected category and rerender the list.
+        """
+        self.category = category
+        self.render()
 
     # Render all the Items object inside the column, with the specified date and category
     def render(self) -> None:
@@ -1212,6 +1327,13 @@ class ItemsList:
 
         # For each item in the fetched list, render its corresponding component
         self.container.clear()
+        if not items:
+            with self.container:
+                ui.label(f"No items found for {self.category} on {self.date}.").classes(
+                    "font-mono text-base text-grey-7 pt-4"
+                )
+            return
+
         for item_name, item_info in items.items():
             with self.container:
                 Item(item_name, item_info, self.basket)
@@ -1264,25 +1386,37 @@ with ui.element("div").classes("w-full p-8"):
     # Creating the items list section
     items_list: ItemsList = ItemsList(basket, list_container)
 
+    def refresh_drop_dates(_: Any = None) -> None:
+        """
+        Refresh the drop-date selector and rerender items.
+        """
+        date.options = items_list.refresh_drop_dates()
+        date.value = items_list.date
+        date.update()
+        items_list.render()
+
     # Creating the select and tabs widgets
     with selectors_container:
-        date: ui.select = (
-            ui.select(
-                options=get_drop_dates(),
-                label="Select a drop date",
-                value=get_drop_dates()[0],
-                on_change=lambda: items_list.render(),
+        with ui.row(align_items="center").classes("w-full gap-2 no-wrap"):
+            date: ui.select = (
+                ui.select(
+                    options=items_list.drop_dates,
+                    label="Select a drop date",
+                    value=items_list.date,
+                    on_change=lambda e: items_list.set_date(e.value),
+                )
+                .props("square outlined color=black")
+                .classes("font-mono flex-1")
             )
-            .props("square outlined color=black")
-            .classes("font-mono")
-            .bind_value_to(items_list, "date")
-        )
+            ui.button(icon="refresh", on_click=refresh_drop_dates).props(
+                "square outline color=black"
+            ).classes("font-mono")
         with ui.tabs(
             value="T-Shirts",
-            on_change=lambda _: items_list.render(),
+            on_change=lambda e: items_list.set_category(e.value),
         ).props(
             "indicator-color=red-600 align=justify"
-        ).classes("font-mono").bind_value_to(items_list, "category") as tabs:
+        ).classes("font-mono") as tabs:
             ui.tab("T-Shirts")
             ui.tab("Accessories")
             ui.tab("Sweatshirts")
