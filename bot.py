@@ -88,7 +88,7 @@ class Bot:
         self.links_list.clear()
 
         # Config for the scraping process
-        BASE_URL: str = "https://eu.supreme.com/collections/new"
+        BASE_URL: str = "https://us.supreme.com/collections/new"
         HEADERS: str = {"User-Agent": "Mozilla/5.0"}
 
         def fetch_data(url: str) -> dict:
@@ -185,7 +185,7 @@ class Bot:
                         and product.get("color") == self.ITEMS_STYLES[i]
                     ):
                         self.links_list.append(
-                            f"https://eu.supreme.com{product.get('url')}"
+                            f"https://us.supreme.com{product.get('url')}"
                         )
 
         except (requests.RequestException, ValueError, json.JSONDecodeError) as e:
@@ -225,7 +225,7 @@ class Bot:
         """
 
         # Going to the supreme checkout form link
-        await page.goto("https://eu.supreme.com/it/checkout")
+        await page.goto("https://us.supreme.com/checkout")
 
         # Accept the terms
         await page.click('input[type="checkbox"]')

@@ -13,6 +13,7 @@ from bot import Bot
 
 # Nation and zones codes dictionary constants
 NATIONS: dict = {
+    "United States": "US",
     "Austria": "AT",
     "Belgium": "BE",
     "Bulgaria": "BG",
@@ -47,6 +48,59 @@ NATIONS: dict = {
     "Turkey": "TR",
 }
 ZONES: dict = {
+    "United States": {
+        "Alabama": "AL",
+        "Alaska": "AK",
+        "Arizona": "AZ",
+        "Arkansas": "AR",
+        "California": "CA",
+        "Colorado": "CO",
+        "Connecticut": "CT",
+        "Delaware": "DE",
+        "District of Columbia": "DC",
+        "Florida": "FL",
+        "Georgia": "GA",
+        "Hawaii": "HI",
+        "Idaho": "ID",
+        "Illinois": "IL",
+        "Indiana": "IN",
+        "Iowa": "IA",
+        "Kansas": "KS",
+        "Kentucky": "KY",
+        "Louisiana": "LA",
+        "Maine": "ME",
+        "Maryland": "MD",
+        "Massachusetts": "MA",
+        "Michigan": "MI",
+        "Minnesota": "MN",
+        "Mississippi": "MS",
+        "Missouri": "MO",
+        "Montana": "MT",
+        "Nebraska": "NE",
+        "Nevada": "NV",
+        "New Hampshire": "NH",
+        "New Jersey": "NJ",
+        "New Mexico": "NM",
+        "New York": "NY",
+        "North Carolina": "NC",
+        "North Dakota": "ND",
+        "Ohio": "OH",
+        "Oklahoma": "OK",
+        "Oregon": "OR",
+        "Pennsylvania": "PA",
+        "Rhode Island": "RI",
+        "South Carolina": "SC",
+        "South Dakota": "SD",
+        "Tennessee": "TN",
+        "Texas": "TX",
+        "Utah": "UT",
+        "Vermont": "VT",
+        "Virginia": "VA",
+        "Washington": "WA",
+        "West Virginia": "WV",
+        "Wisconsin": "WI",
+        "Wyoming": "WY",
+    },
     "Ireland": {
         "Carlow": "CW",
         "Cavan": "CN",
@@ -771,11 +825,18 @@ class BasketCheckout:
         """
 
         # Checking if the selected country falls inside the country zones options
-        if self.bot.COUNTRY in ["Ireland", "Italy", "Portugal", "Romania", "Spain"]:
+        if self.bot.COUNTRY in [
+            "United States",
+            "Ireland",
+            "Italy",
+            "Portugal",
+            "Romania",
+            "Spain",
+        ]:
             zones: list[str] = [zone for zone in ZONES[self.bot.COUNTRY].keys()]
             with ui.grid(columns="1fr 1fr"):
                 custom_input("Postal Code").bind_value_to(self.bot, "POSTAL_CODE")
-                custom_select(zones, value=zones[0])
+                custom_select(zones, value=zones[0]).bind_value_to(self.bot, "ZONE")
             with ui.grid(columns="1fr 1fr"):
                 custom_input("City").bind_value_to(self.bot, "CITY")
                 custom_input("Name on Card").bind_value_to(self.bot, "NAME_ON_CARD")
@@ -815,7 +876,7 @@ class BasketCheckout:
                 with nations_card_grid:
                     custom_select(
                         [nation for nation in NATIONS.keys()],
-                        value="Austria",
+                        value="United States",
                         on_change=lambda _: self.reload(),
                     ).bind_value_to(self.bot, "COUNTRY")
                     custom_input("Card Number").bind_value_to(self.bot, "CARD_NUMBER")
