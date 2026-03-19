@@ -8,8 +8,32 @@ import platform
 from functools import cache
 import re
 import datetime
+import time
 import json
 from typing import Any
+DEBUG_LOG_PATH: str = "/Users/kevinlin/Documents/GitHub/supremebot/.cursor/debug-003a64.log"
+
+
+# #region agent log
+def _agent_log(*, hypothesisId: str, location: str, message: str, data: dict) -> None:
+    try:
+        payload = {
+            "sessionId": "003a64",
+            "runId": "pre-fix",
+            "hypothesisId": hypothesisId,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+        }
+        with open(DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+# #endregion
+
 from bot import Bot
 
 # Nation and zones codes dictionary constants
@@ -866,6 +890,21 @@ class BasketCheckout:
         self.checkout_already_rendered: bool = False
         self.bot: Bot = Bot(NATIONS, ZONES)
 
+        # #region agent log
+        _agent_log(
+            hypothesisId="H1",
+            location="main.py:BasketCheckout.__init__",
+            message="BasketCheckout initialized",
+            data={
+                "basket_id": id(self),
+                "bot_id": id(self.bot),
+                "items_number": int(self.items_number)
+                if isinstance(self.items_number, int)
+                else str(self.items_number),
+            },
+        )
+        # #endregion
+
         # Rendering the basket
         self.render()
 
@@ -999,6 +1038,22 @@ class BasketCheckout:
         while others use a simplified address form.
         """
 
+        # #region agent log
+        _agent_log(
+            hypothesisId="H3",
+            location="main.py:BasketCheckout.render_zone",
+            message="render_zone called",
+            data={
+                "basket_id": id(self),
+                "bot_id": id(self.bot),
+                "country": self.bot.COUNTRY,
+                "postal_len": len(self.bot.POSTAL_CODE or ""),
+                "city_len": len(self.bot.CITY or ""),
+                "name_on_card_len": len(self.bot.NAME_ON_CARD or ""),
+            },
+        )
+        # #endregion
+
         # Checking if the selected country falls inside the country zones options
         if self.bot.COUNTRY in [
             "United States",
@@ -1035,6 +1090,24 @@ class BasketCheckout:
 
         # Checking frist if the basket isn't empty
         if not self.is_empty():
+
+            # #region agent log
+            _agent_log(
+                hypothesisId="H2",
+                location="main.py:BasketCheckout.render_checkout",
+                message="render_checkout called",
+                data={
+                    "basket_id": id(self),
+                    "bot_id": id(self.bot),
+                    "checkout_already_rendered": bool(self.checkout_already_rendered),
+                    "email_len": len(self.bot.EMAIL or ""),
+                    "first_name_len": len(self.bot.FIRST_NAME or ""),
+                    "last_name_len": len(self.bot.LAST_NAME or ""),
+                    "address_len": len(self.bot.ADDRESS or ""),
+                    "phone_len": len(self.bot.PHONE or ""),
+                },
+            )
+            # #endregion
 
             # Setting the first rendering to true
             self.checkout_already_rendered: bool = True
@@ -1079,6 +1152,18 @@ class BasketCheckout:
         """
         Reloads the zone selection UI when the country changes.
         """
+        # #region agent log
+        _agent_log(
+            hypothesisId="H3",
+            location="main.py:BasketCheckout.reload",
+            message="Country changed -> render_zone.refresh",
+            data={
+                "basket_id": id(self),
+                "bot_id": id(self.bot),
+                "country": self.bot.COUNTRY,
+            },
+        )
+        # #endregion
         self.render_zone.refresh()
 
     # Function to render the basket recap
@@ -1368,9 +1453,7 @@ class Item(ui.grid):
 
 # Creating the Items List UI and logic blueprint
 class ItemsList:
-    def __init__(
-        self, basket: BasketCheckout, container: ui.column, debug_container: ui.column
-    ) -> None:
+    def __init__(self, basket: BasketCheckout, container: ui.column) -> None:
         """
         Controller class responsible for rendering a list of product items.
 
@@ -1396,21 +1479,6 @@ class ItemsList:
         self.category: str = "T-Shirts"
         self.basket: BasketCheckout = basket
         self.container: ui.column = container
-        self.debug_container: ui.column = debug_container
-        self.debug_info: dict = {
-            "last_event": "initial load",
-            "selected_date": self.date,
-            "selected_category": self.category,
-            "url": "",
-            "http_status": "",
-            "http_matches": 0,
-            "rendered_matches": 0,
-            "source": "none",
-            "items_built": 0,
-            "detail_pages_ok": 0,
-            "detail_pages_failed": 0,
-            "messages": [],
-        }
 
     def refresh_drop_dates(self) -> list[str]:
         """
@@ -1432,7 +1500,6 @@ class ItemsList:
         Update the selected drop date and rerender the list.
         """
         self.date = drop_date
-        self.debug_info["last_event"] = f"date changed -> {drop_date}"
         self.render()
 
     def set_category(self, category: str) -> None:
@@ -1440,52 +1507,7 @@ class ItemsList:
         Update the selected category and rerender the list.
         """
         self.category = category
-        self.debug_info["last_event"] = f"category changed -> {category}"
         self.render()
-
-    def render_debug(self) -> None:
-        """
-        Render a temporary on-screen debug panel for scraper state.
-        """
-        self.debug_container.clear()
-        with self.debug_container:
-            with ui.card().classes("w-full mt-4 bg-grey-1"):
-                ui.label("Debug").classes("font-mono font-bold text-base")
-                ui.label(
-                    f"event: {self.debug_info.get('last_event', 'n/a')}"
-                ).classes("font-mono text-sm")
-                ui.label(
-                    f"date: {self.debug_info.get('selected_date', 'n/a')}"
-                ).classes("font-mono text-sm")
-                ui.label(
-                    f"category: {self.debug_info.get('selected_category', 'n/a')}"
-                ).classes("font-mono text-sm")
-                ui.label(
-                    f"url: {self.debug_info.get('url', 'n/a')}"
-                ).classes("font-mono text-xs break-all")
-                ui.label(
-                    "http status: "
-                    f"{self.debug_info.get('http_status', 'n/a')} | "
-                    f"http matches: {self.debug_info.get('http_matches', 0)} | "
-                    f"rendered matches: {self.debug_info.get('rendered_matches', 0)}"
-                ).classes("font-mono text-sm")
-                ui.label(
-                    "source: "
-                    f"{self.debug_info.get('source', 'n/a')} | "
-                    f"items built: {self.debug_info.get('items_built', 0)} | "
-                    f"detail ok: {self.debug_info.get('detail_pages_ok', 0)} | "
-                    f"detail failed: {self.debug_info.get('detail_pages_failed', 0)}"
-                ).classes("font-mono text-sm")
-                ui.label(
-                    "page categories: "
-                    + ", ".join(self.debug_info.get("available_categories", []))
-                ).classes("font-mono text-xs break-all")
-                messages = self.debug_info.get("messages", [])
-                if messages:
-                    for message in messages:
-                        ui.label(f"- {message}").classes(
-                            "font-mono text-xs text-red-700 break-all"
-                        )
 
     # Render all the Items object inside the column, with the specified date and category
     def render(self) -> None:
@@ -1500,25 +1522,14 @@ class ItemsList:
 
         self.container.clear()
         try:
-            items, debug_info = fetch_items(self.date, self.category)
-            debug_info["last_event"] = self.debug_info.get("last_event", "render")
-            self.debug_info = debug_info
+            items, _ = fetch_items(self.date, self.category)
         except Exception as e:
-            self.debug_info = {
-                **self.debug_info,
-                "selected_date": self.date,
-                "selected_category": self.category,
-                "items_built": 0,
-                "messages": [f"render crashed: {type(e).__name__}: {e}"],
-            }
-            self.render_debug()
             with self.container:
                 ui.label(
                     f"Error loading items for {self.category} on {self.date}."
                 ).classes("font-mono text-base text-red-700 pt-4")
             return
 
-        self.render_debug()
         if not items:
             with self.container:
                 ui.label(f"No items found for {self.category} on {self.date}.").classes(
@@ -1546,7 +1557,6 @@ with ui.element("div").classes("w-full p-8"):
     selectors_container: ui.grid = ui.grid(columns="1fr 5fr").classes("py-8")
 
     # The container for the items list
-    debug_container: ui.column = ui.column(align_items="stretch")
     list_container: ui.column = ui.column(align_items="stretch")
 
     # The container for the basket recap UI
@@ -1577,7 +1587,7 @@ with ui.element("div").classes("w-full p-8"):
     basket: BasketCheckout = BasketCheckout(basket_notifier, footer_container)
 
     # Creating the items list section
-    items_list: ItemsList = ItemsList(basket, list_container, debug_container)
+    items_list: ItemsList = ItemsList(basket, list_container)
 
     def refresh_drop_dates(_: Any = None) -> None:
         """
@@ -1624,9 +1634,57 @@ with ui.element("div").classes("w-full p-8"):
     # Rendering the list (after NiceGUI event loop starts)
     ui.timer(
         0.0,
-        lambda: (items_list.render_debug(), items_list.render()),
+        items_list.render,
         once=True,
     )
+
+# #region agent log
+def _log_connect_event(event: str) -> None:
+    try:
+        client = ui.context.client
+        _agent_log(
+            hypothesisId="H1",
+            location="main.py:_log_connect_event",
+            message=event,
+            data={
+                "client_id": getattr(client, "id", None),
+                "has_client": client is not None,
+            },
+        )
+    except Exception:
+        _agent_log(
+            hypothesisId="H1",
+            location="main.py:_log_connect_event",
+            message=event,
+            data={"client_id": None, "has_client": False},
+        )
+
+
+try:
+    # NiceGUI exposes connect hooks on some versions via `app`, not `ui`
+    from nicegui import app  # type: ignore
+
+    if hasattr(app, "on_connect"):
+        app.on_connect(lambda: _log_connect_event("client_connect"))  # type: ignore
+    if hasattr(app, "on_disconnect"):
+        app.on_disconnect(lambda: _log_connect_event("client_disconnect"))  # type: ignore
+    _agent_log(
+        hypothesisId="H1",
+        location="main.py:connect_hooks",
+        message="connect hooks registered",
+        data={
+            "has_app_on_connect": bool(hasattr(app, "on_connect")),
+            "has_app_on_disconnect": bool(hasattr(app, "on_disconnect")),
+        },
+    )
+except Exception as e:
+    _agent_log(
+        hypothesisId="H1",
+        location="main.py:connect_hooks",
+        message="connect hooks registration failed",
+        data={"error": type(e).__name__},
+    )
+# #endregion
 
 # Running the app
 ui.run(title="Supremebot", favicon="img/icon.png")

@@ -449,6 +449,87 @@ class Bot:
 
         raise TimeoutError(f"{context} did not become ready before timeout.")
 
+    async def _fill_locator_value(
+        self,
+        locator: playwright.async_api._generated.Locator,
+        value: str,
+    ) -> bool:
+        """
+        Fill a locator, falling back to typed input for masked payment fields.
+        """
+        try:
+            await locator.click()
+        except Exception:
+            pass
+
+        try:
+            await locator.fill(value)
+            return True
+        except Exception:
+            pass
+
+        try:
+            await locator.type(value, delay=40)
+            return True
+        except Exception:
+            return False
+
+    async def _fill_payment_field(
+        self,
+        page: playwright.async_api._generated.Page,
+        *,
+        field_name: str,
+        value: str,
+        frame_selectors: list[str],
+        input_selectors: list[str],
+        frame_hints: list[str],
+    ) -> None:
+        """
+        Fill a hosted checkout payment field across several iframe/input layouts.
+        """
+        if not value:
+            return
+
+        # Try direct inputs first in case the checkout renders them without iframes.
+        for input_selector in input_selectors:
+            locator = page.locator(input_selector).first
+            try:
+                if await locator.count() and await locator.is_visible():
+                    if await self._fill_locator_value(locator, value):
+                        return
+            except Exception:
+                continue
+
+        # Then try iframe selectors against the page DOM.
+        for frame_selector in frame_selectors:
+            for input_selector in input_selectors:
+                try:
+                    locator = page.frame_locator(frame_selector).locator(
+                        input_selector
+                    ).first
+                    if await locator.count():
+                        if await self._fill_locator_value(locator, value):
+                            return
+                except Exception:
+                    continue
+
+        # Finally, scan loaded frames by URL/name hints.
+        for frame in page.frames:
+            frame_key = f"{frame.url} {frame.name or ''}".lower()
+            if not any(hint in frame_key for hint in frame_hints):
+                continue
+
+            for input_selector in input_selectors:
+                try:
+                    locator = frame.locator(input_selector).first
+                    if await locator.count():
+                        if await self._fill_locator_value(locator, value):
+                            return
+                except Exception:
+                    continue
+
+        raise TimeoutError(f"Unable to find payment field: {field_name}")
+
     # Method for Checkout
     async def checkout(self, page: playwright.async_api._generated.Page) -> None:
         """
@@ -495,26 +576,95 @@ class Bot:
 
         await self._wait_for_ready_or_manual_solve(
             page,
-            ["iframe[src*='checkout.shopifycs.com/number']"],
+            [
+                "iframe[src*='checkout.shopifycs.com/number']",
+                "iframe[title*='Card number']",
+                "iframe[name*='number']",
+                "iframe[id*='number']",
+                "input[name='number']",
+                "input[autocomplete='cc-number']",
+            ],
             "payment fields",
         )
 
-        # Fill credit card details in iframe
-        await page.frame_locator(
-            'iframe[src*="checkout.shopifycs.com/number"]'
-        ).locator('input[name="number"]').fill(self.CARD_NUMBER)
+        await self._fill_payment_field(
+            page,
+            field_name="card number",
+            value=self.CARD_NUMBER,
+            frame_selectors=[
+                'iframe[src*="checkout.shopifycs.com/number"]',
+                'iframe[title*="Card number"]',
+                'iframe[name*="number"]',
+                'iframe[id*="number"]',
+            ],
+            input_selectors=[
+                'input[name="number"]',
+                'input[autocomplete="cc-number"]',
+                'input[placeholder*="Card number"]',
+                'input[inputmode="numeric"]',
+            ],
+            frame_hints=["number", "card", "payment"],
+        )
 
-        await page.frame_locator(
-            'iframe[src*="checkout.shopifycs.com/expiry"]'
-        ).locator('input[name="expiry"]').fill(f"{self.MONTH_EXP}/{self.YEAR_EXP}")
+        await self._fill_payment_field(
+            page,
+            field_name="expiry",
+            value=f"{self.MONTH_EXP}/{self.YEAR_EXP}",
+            frame_selectors=[
+                'iframe[src*="checkout.shopifycs.com/expiry"]',
+                'iframe[title*="Expiration"]',
+                'iframe[title*="Expiry"]',
+                'iframe[name*="expiry"]',
+                'iframe[id*="expiry"]',
+            ],
+            input_selectors=[
+                'input[name="expiry"]',
+                'input[autocomplete="cc-exp"]',
+                'input[placeholder*="MM / YY"]',
+                'input[placeholder*="Expiration"]',
+            ],
+            frame_hints=["expiry", "exp", "payment"],
+        )
 
-        await page.frame_locator(
-            'iframe[src*="checkout.shopifycs.com/verification_value"]'
-        ).locator('input[name="verification_value"]').fill(self.CVV)
+        await self._fill_payment_field(
+            page,
+            field_name="security code",
+            value=self.CVV,
+            frame_selectors=[
+                'iframe[src*="checkout.shopifycs.com/verification_value"]',
+                'iframe[title*="Security code"]',
+                'iframe[title*="CVV"]',
+                'iframe[name*="verification"]',
+                'iframe[id*="verification"]',
+                'iframe[name*="cvv"]',
+                'iframe[id*="cvv"]',
+            ],
+            input_selectors=[
+                'input[name="verification_value"]',
+                'input[autocomplete="cc-csc"]',
+                'input[placeholder*="Security code"]',
+                'input[placeholder*="CVV"]',
+            ],
+            frame_hints=["verification", "security", "cvv", "payment"],
+        )
 
-        await page.frame_locator('iframe[src*="checkout.shopifycs.com/name"]').locator(
-            'input[name="name"]'
-        ).fill(self.NAME_ON_CARD)
+        await self._fill_payment_field(
+            page,
+            field_name="name on card",
+            value=self.NAME_ON_CARD,
+            frame_selectors=[
+                'iframe[src*="checkout.shopifycs.com/name"]',
+                'iframe[title*="Name on card"]',
+                'iframe[name*="name"]',
+                'iframe[id*="name"]',
+            ],
+            input_selectors=[
+                'input[name="name"]',
+                'input[autocomplete="cc-name"]',
+                'input[placeholder*="Name on card"]',
+            ],
+            frame_hints=["name", "cardholder", "payment"],
+        )
 
     # Function to start the bot
     async def start(self) -> None:
